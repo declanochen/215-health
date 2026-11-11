@@ -1,0 +1,12 @@
+{
+  "name": "215-health-sync",
+  "private": true,
+  "type": "module",
+  "description": "Pulls daily Fitbit / Google Health numbers for The 215 Log. Contains no credentials.",
+  "scripts": {
+    "fetch": "node sync/fetch.mjs"
+  },
+  "dependencies": {
+    "google-health-mcp-unofficial": "0.8.0"
+  }
+}
