@@ -1,43 +1,63 @@
-// Pulls one summary row per day from the Google Health API for The 215 Log.
+// Pulls one summary row per day from the Google Health API (v4) for The 215 Log.
+// No dependencies: plain Node 18+ (uses built-in fetch).
 //
 // Usage:  node sync/fetch.mjs --start 2026-10-12 --end 2026-11-11 [--out out/health.json]
-//   --end is exclusive. Dates are America/New_York calendar days.
+//   --end is exclusive. Dates are the account's local calendar days (America/New_York).
 //
 // Credentials (never stored in this repo):
-//   Local Mac: read from ~/.google-health-mcp/ (written by `google-health-mcp-unofficial setup/auth`).
-//   Cloud:     GOOGLE_HEALTH_CLIENT_ID, GOOGLE_HEALTH_CLIENT_SECRET and GOOGLE_HEALTH_REFRESH_TOKEN
-//              environment variables. A throwaway token file is created in a temp folder.
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+//   Env vars GOOGLE_HEALTH_CLIENT_ID, GOOGLE_HEALTH_CLIENT_SECRET, GOOGLE_HEALTH_REFRESH_TOKEN, or
+//   on the Mac, ~/.google-health-mcp/config.json + tokens.json (written by google-health-mcp-unofficial auth).
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 
 const TZ = "America/New_York";
-const args = Object.fromEntries(process.argv.slice(2).reduce((acc, a, i, all) => {
-  if (a.startsWith("--")) acc.push([a.slice(2), all[i + 1]]);
-  return acc;
-}, []));
+const API = "https://health.googleapis.com";
+const args = {};
+process.argv.slice(2).forEach((a, i, all) => { if (a.startsWith("--")) args[a.slice(2)] = all[i + 1]; });
 
 const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s || "");
 const addDays = (s, n) => { const d = new Date(s + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
 const localToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: TZ }).format(new Date());
-
 const end = isDate(args.end) ? args.end : addDays(localToday(), 1);
 const start = isDate(args.start) ? args.start : addDays(end, -8);
 if (start >= end) { console.error("start must be before end"); process.exit(2); }
 
-// Cloud mode: build a temporary token file from the refresh token.
-if (process.env.GOOGLE_HEALTH_REFRESH_TOKEN) {
-  const dir = mkdtempSync(join(tmpdir(), "gh-"));
-  const p = join(dir, "run.tokens.json");
-  writeFileSync(p, JSON.stringify({ access_token: "expired", expires_at: 1, token_type: "Bearer", refresh_token: process.env.GOOGLE_HEALTH_REFRESH_TOKEN.trim() }), { mode: 0o600 });
-  process.env.GOOGLE_HEALTH_TOKEN_PATH = p;
-  process.env.GOOGLE_HEALTH_REDIRECT_URI ||= "http://127.0.0.1:3000/callback";
-}
-process.env.GOOGLE_HEALTH_CACHE = "false";
+function readJson(p) { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return {}; } }
+const localDir = join(homedir(), ".google-health-mcp");
+const cfg = readJson(join(localDir, "config.json")), tok = readJson(join(localDir, "tokens.json"));
+const clientId = process.env.GOOGLE_HEALTH_CLIENT_ID || cfg.GOOGLE_HEALTH_CLIENT_ID;
+const clientSecret = process.env.GOOGLE_HEALTH_CLIENT_SECRET || cfg.GOOGLE_HEALTH_CLIENT_SECRET;
+const refreshToken = process.env.GOOGLE_HEALTH_REFRESH_TOKEN || tok.refresh_token;
+const missing = [["GOOGLE_HEALTH_CLIENT_ID", clientId], ["GOOGLE_HEALTH_CLIENT_SECRET", clientSecret], ["GOOGLE_HEALTH_REFRESH_TOKEN", refreshToken]].filter(x => !x[1]).map(x => x[0]);
+if (missing.length) { console.error("Missing credentials: " + missing.join(", ")); process.exit(3); }
 
-const { getConfig } = await import("google-health-mcp-unofficial/dist/services/config.js");
-const { GoogleHealthClient } = await import("google-health-mcp-unofficial/dist/services/google-health-client.js");
-const client = new GoogleHealthClient(getConfig());
+// Exchange the refresh token for a short-lived access token.
+const tr = await fetch("https://oauth2.googleapis.com/token", {
+  method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, grant_type: "refresh_token", refresh_token: refreshToken }).toString()
+});
+const tj = await tr.json().catch(() => ({}));
+if (!tr.ok || !tj.access_token) {
+  const msg = `token refresh failed: HTTP ${tr.status} ${tj.error || ""} ${tj.error_description || ""}`.trim();
+  const result = { source: "google_health", start, end, fetchedAt: new Date().toISOString(), days: [], errors: [msg] };
+  if (args.out) { mkdirSync(dirname(args.out), { recursive: true }); writeFileSync(args.out, JSON.stringify(result, null, 2)); }
+  console.error(msg); process.exit(4);
+}
+const auth = { Authorization: `Bearer ${tj.access_token}`, Accept: "application/json" };
+
+async function call(method, path, params, body) {
+  const url = new URL(API + path);
+  for (const [k, v] of Object.entries(params || {})) if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await fetch(url, { method, headers: body ? { ...auth, "Content-Type": "application/json" } : auth, body: body ? JSON.stringify(body) : undefined });
+    if (r.status === 429 || r.status >= 500) { await new Promise(res => setTimeout(res, 1000 * (attempt + 1))); continue; }
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${(j.error && j.error.message) || "request failed"}`);
+    return j;
+  }
+  throw new Error("HTTP retry limit");
+}
 
 const days = {};
 const row = date => (days[date] ||= { date });
@@ -45,14 +65,15 @@ const inRange = date => date >= start && date < end;
 const ymd = d => d && d.year ? `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}` : null;
 const num = v => (v === undefined || v === null || v === "" ? null : Number(v));
 const secs = v => (typeof v === "string" && v.endsWith("s") ? Number(v.slice(0, -1)) : null);
+const civil = s => { const [year, month, day] = s.split("-").map(Number); return { date: { year, month, day }, time: { hours: 0, minutes: 0, seconds: 0, nanos: 0 } }; };
 const errors = [];
 
 async function rollup(dataType, pick) {
-  // Some types (total-calories) cap a rollup request at 14 days, so ask in 14-day chunks.
+  // Some types (total-calories) cap a rollup at 14 days, so ask in 14-day chunks.
   for (let s = start; s < end; s = addDays(s, 14)) {
     const e = addDays(s, 14) < end ? addDays(s, 14) : end;
     try {
-      const res = await client.dailyRollup({ dataType, startDate: s, endDate: e, timezone: TZ, pageSize: 14 });
+      const res = await call("POST", `/v4/users/me/dataTypes/${dataType}/dataPoints:dailyRollUp`, null, { range: { start: civil(s), end: civil(e) }, windowSizeDays: 1, pageSize: 14 });
       for (const p of res.rollupDataPoints || []) {
         const date = ymd(p.civilStartTime && p.civilStartTime.date);
         if (date && inRange(date)) pick(row(date), p);
@@ -61,12 +82,12 @@ async function rollup(dataType, pick) {
   }
 }
 
-// Lists come back newest first for daily types; stop once a page is entirely older than `start`.
+// Daily lists come back newest first; stop once a whole page is older than `start`.
 async function list(dataType, dateOf, pick, maxPages = 30) {
   try {
     let pageToken;
     for (let i = 0; i < maxPages; i++) {
-      const res = await client.listDataPoints({ dataType, pageSize: 500, pageToken });
+      const res = await call("GET", `/v4/users/me/dataTypes/${dataType}/dataPoints`, { pageSize: 500, pageToken });
       const pts = res.dataPoints || [];
       let anyNewer = false;
       for (const p of pts) {
@@ -78,7 +99,7 @@ async function list(dataType, dateOf, pick, maxPages = 30) {
       pageToken = res.nextPageToken;
       if (!pageToken || (!anyNewer && pts.length && dataType !== "weight")) break;
     }
-  } catch (e) { errors.push(`${dataType}: ${String(e.message || e).slice(0, 160)}`); }
+  } catch (err) { errors.push(`${dataType}: ${String(err.message || err).slice(0, 160)}`); }
 }
 
 await rollup("steps", (r, p) => { r.steps = num(p.steps && p.steps.countSum); });
@@ -100,8 +121,7 @@ await list("daily-heart-rate-variability", p => ymd(p.dailyHeartRateVariability 
 // Sleep counts toward the day you wake up (local time).
 const wakeDate = p => {
   const iv = p.sleep && p.sleep.interval; if (!iv || !iv.endTime) return null;
-  const off = secs(iv.endUtcOffset) || 0;
-  return new Date(Date.parse(iv.endTime) + off * 1000).toISOString().slice(0, 10);
+  return new Date(Date.parse(iv.endTime) + (secs(iv.endUtcOffset) || 0) * 1000).toISOString().slice(0, 10);
 };
 await list("sleep", wakeDate, (r, p) => {
   const s = p.sleep, sum = s.summary || {};
