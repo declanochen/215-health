@@ -130,6 +130,14 @@ await list("sleep", wakeDate, (r, p) => {
   const asleep = num(sum.minutesAsleep);
   if (asleep == null || (r.sleepMin != null && r.sleepMin >= asleep)) return;
   r.sleepMin = asleep; r.deepMin = st.DEEP ?? null; r.remMin = st.REM ?? null; r.awakeMin = num(sum.minutesAwake);
+  // Bedtime / wake time in local clock time. bedMin is minutes from midnight of the wake day
+  // (negative = before midnight, e.g. 23:30 -> -30), so it averages cleanly across midnight.
+  const local = (iso, off) => new Date(Date.parse(iso) + (secs(off) || 0) * 1000).toISOString().slice(11, 16);
+  const iv = s.interval;
+  r.bedtime = local(iv.startTime, iv.startUtcOffset);
+  r.wakeTime = local(iv.endTime, iv.endUtcOffset);
+  const [bh, bm] = r.bedtime.split(":").map(Number);
+  r.bedMin = bh >= 12 ? (bh * 60 + bm) - 1440 : bh * 60 + bm;
 });
 // Weight: keep the latest reading of each day, in pounds.
 await list("weight", p => ymd(p.weight && p.weight.sampleTime && p.weight.sampleTime.civilTime && p.weight.sampleTime.civilTime.date), (r, p) => {
