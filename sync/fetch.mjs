@@ -104,6 +104,7 @@ async function list(dataType, dateOf, pick, maxPages = 30) {
 
 await rollup("steps", (r, p) => { r.steps = num(p.steps && p.steps.countSum); });
 await rollup("total-calories", (r, p) => { const k = p.totalCalories && p.totalCalories.kcalSum; r.calories = k == null ? null : Math.round(k); });
+await rollup("active-energy-burned", (r, p) => { const k = p.activeEnergyBurned && p.activeEnergyBurned.kcalSum; r.activeCal = k == null ? null : Math.round(k); });
 await rollup("active-zone-minutes", (r, p) => {
   const a = p.activeZoneMinutes || {};
   r.azm = { fatBurn: num(a.sumInFatBurnHeartZone) || 0, cardio: num(a.sumInCardioHeartZone) || 0, peak: num(a.sumInPeakHeartZone) || 0 };
