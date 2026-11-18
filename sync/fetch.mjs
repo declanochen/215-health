@@ -118,6 +118,17 @@ await list("daily-resting-heart-rate", p => ymd(p.dailyRestingHeartRate && p.dai
   (r, p) => { r.rhr = num(p.dailyRestingHeartRate.beatsPerMinute); });
 await list("daily-heart-rate-variability", p => ymd(p.dailyHeartRateVariability && p.dailyHeartRateVariability.date),
   (r, p) => { const v = p.dailyHeartRateVariability.averageHeartRateVariabilityMilliseconds; r.hrv = v == null ? null : Math.round(v * 10) / 10; });
+// Overnight illness signals: breathing rate, skin temperature vs personal baseline, blood oxygen.
+await list("daily-respiratory-rate", p => ymd(p.dailyRespiratoryRate && p.dailyRespiratoryRate.date),
+  (r, p) => { const v = p.dailyRespiratoryRate.breathsPerMinute; r.resp = v == null ? null : Math.round(v * 10) / 10; });
+await list("daily-sleep-temperature-derivations", p => ymd(p.dailySleepTemperatureDerivations && p.dailySleepTemperatureDerivations.date), (r, p) => {
+  const t = p.dailySleepTemperatureDerivations;
+  if (t.nightlyTemperatureCelsius == null || t.baselineTemperatureCelsius == null) return;
+  r.tempDev = Math.round((t.nightlyTemperatureCelsius - t.baselineTemperatureCelsius) * 100) / 100;
+  if (t.relativeNightlyStddev30dCelsius) r.tempSd = Math.round(t.relativeNightlyStddev30dCelsius * 100) / 100;
+});
+await list("daily-oxygen-saturation", p => ymd(p.dailyOxygenSaturation && p.dailyOxygenSaturation.date),
+  (r, p) => { const v = p.dailyOxygenSaturation.averagePercentage; r.spo2 = v == null ? null : Math.round(v * 10) / 10; });
 // Sleep counts toward the day you wake up (local time).
 const wakeDate = p => {
   const iv = p.sleep && p.sleep.interval; if (!iv || !iv.endTime) return null;
